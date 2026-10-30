@@ -43,7 +43,7 @@ def rides_of(obj):
 
 def main():
     now = dt.datetime.now(JST)
-            if not (OPEN_FROM <= now.hour * 60 + now.minute < OPEN_TO):
+    if not (OPEN_FROM <= now.hour * 60 + now.minute < OPEN_TO):
         print("営業時間外 (%s JST) なので記録しません。" % now.strftime("%H:%M"))
         return
 
