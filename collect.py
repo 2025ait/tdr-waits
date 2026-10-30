@@ -16,7 +16,7 @@ import urllib.request
 PARKS = {"274": "land", "275": "sea"}
 API = "https://queue-times.com/parks/{park}/queue_times.json"
 JST = dt.timezone(dt.timedelta(hours=9))
-OPEN_FROM, OPEN_TO = 8 * 60 + 30, 21 * 60 + 15   # 8:30〜21:15（日本時間）
+OPEN_FROM, OPEN_TO = 8 * 60 + 30, 22 * 60        # 8:30〜22:00（日本時間）
 #   ランドのハッピーエントリー（宿泊者の先行入園）は一般ゲストの15分前=8:30 から。
 #   8:30〜8:45 は園内がほぼ宿泊者だけになる、この研究で最も価値のある15分。
 FIELDS = ["ts_jst", "date_jst", "time_jst", "park_id", "park",
