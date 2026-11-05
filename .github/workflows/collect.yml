@@ -1,9 +1,27 @@
 name: collect waits
 
+# 考え方
+#   GitHub の定期実行は「できたら動かす」程度の約束しかなく、15分おきのような
+#   細かい指定は混雑時にごっそり捨てられる。そこで「54回起動してもらう」のを
+#   やめて、「1回起動したら、その中で数時間ループし続ける」作りにする。
+#   1日に必要な起動は数回だけになるので、GitHub が気まぐれでも耐えられる。
+#
+#   1日を3コマに分ける（日本時間）
+#     コマ1  8:30 〜 13:00
+#     コマ2 13:00 〜 17:30
+#     コマ3 17:30 〜 22:00
+#   起動した時刻から見て「次の区切り」まで走る。遅れて起動しても区切りは
+#   ずれないので、コマがだぶらない。
+
 on:
   schedule:
-    # 15分おき。GitHub の時刻は UTC なので、日本時間 8:00-22:00 = UTC 23:00-13:00
-    - cron: "*/15 23,0,1,2,3,4,5,6,7,8,9,10,11,12 * * *"
+    # UTC表記。日本時間はこれに+9時間。保険のため1コマにつき2回ずつ起動を試みる。
+    - cron: "25 23 * * *"   # 日本時間  8:25
+    - cron: "55 23 * * *"   # 日本時間  8:55
+    - cron: "5 4 * * *"     # 日本時間 13:05
+    - cron: "35 4 * * *"    # 日本時間 13:35
+    - cron: "35 8 * * *"    # 日本時間 17:35
+    - cron: "5 9 * * *"     # 日本時間 18:05
   workflow_dispatch:        # 手で動かしたいとき用のボタン
 
 permissions:
@@ -11,11 +29,12 @@ permissions:
 
 concurrency:
   group: collect
-  cancel-in-progress: false
+  cancel-in-progress: false   # 走っている最中のものは止めない。次のは順番待ちにする。
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 330      # 1コマ4時間半。上限6時間より十分手前で切る。
     steps:
       - uses: actions/checkout@v4
 
@@ -23,23 +42,56 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 待ち時間を取得
-        run: python collect.py
-
-      - name: 記録をリポジトリに保存
+      - name: 15分おきに取り続ける
+        env:
+          TZ: Asia/Tokyo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data
-          if git diff --staged --quiet; then
-            echo "変化なし。何もしません。"
+
+          b1=$(date -d "today 13:00" +%s)
+          b2=$(date -d "today 17:30" +%s)
+          b3=$(date -d "today 22:00" +%s)
+          now=$(date +%s)
+          if [ "$now" -lt "$(date -d "today 08:00" +%s)" ]; then
+            echo "開園前すぎます（$(date +%H:%M) JST）。何もせず終わります。"
             exit 0
           fi
-          git commit -m "data $(date -u +%Y-%m-%dT%H:%MZ)"
-          for i in 1 2 3 4 5; do
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push && exit 0
-            echo "push に失敗。少し待って再試行します ($i/5)"
-            sleep 10
+          if   [ "$now" -lt "$b1" ]; then end=$b1
+          elif [ "$now" -lt "$b2" ]; then end=$b2
+          elif [ "$now" -lt "$b3" ]; then end=$b3
+          else
+            echo "営業時間を過ぎてから起動しました（$(date +%H:%M) JST）。何もせず終わります。"
+            exit 0
+          fi
+          echo "$(date +%H:%M) JST に開始。$(date -d "@$end" +%H:%M) JST まで15分おきに取ります。"
+
+          while true; do
+            echo "---- $(date +%H:%M) JST ----"
+            python collect.py || echo "この回は取得に失敗しました。次の回に進みます。"
+
+            git add data
+            if git diff --staged --quiet; then
+              echo "書き足すものはありませんでした。"
+            else
+              git commit -q -m "data $(date -u +%Y-%m-%dT%H:%MZ)"
+              pushed=no
+              for i in 1 2 3; do
+                if git pull -q --rebase --autostash origin "${GITHUB_REF_NAME}" && git push -q; then
+                  pushed=yes; break
+                fi
+                echo "push に失敗。少し待って再試行します ($i/3)"
+                sleep 10
+              done
+              [ "$pushed" = yes ] || echo "push できませんでした。次の回にまとめて送ります。"
+            fi
+
+            now=$(date +%s)
+            if [ "$now" -ge "$end" ]; then
+              echo "このコマの終わりに来ました。"
+              break
+            fi
+            sleep $(( 900 - (now % 900) ))
           done
-          echo "5回試しても push できませんでした。"
-          exit 1
+
+          echo "終了 $(date +%H:%M) JST"
