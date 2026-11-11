@@ -1,40 +1,39 @@
 name: collect waits
 
-# 考え方
-#   GitHub の定期実行は「できたら動かす」程度の約束しかなく、15分おきのような
-#   細かい指定は混雑時にごっそり捨てられる。そこで「54回起動してもらう」のを
-#   やめて、「1回起動したら、その中で数時間ループし続ける」作りにする。
-#   1日に必要な起動は数回だけになるので、GitHub が気まぐれでも耐えられる。
+# v3 での変更点
+#   v2 は「次の区切りまで走る」作りだった。ところが GitHub は定期実行を
+#   予定より3〜4時間遅れて届けてくることが分かった（8:25指定のものが
+#   実際には11:30〜12:30に届いていた）。そのため午前がまるごと落ちていた。
 #
-#   1日を3コマに分ける（日本時間）
-#     コマ1  8:30 〜 13:00
-#     コマ2 13:00 〜 17:30
-#     コマ3 17:30 〜 22:00
-#   起動した時刻から見て「次の区切り」まで走る。遅れて起動しても区切りは
-#   ずれないので、コマがだぶらない。
+#   v3 では2つ変える。
+#     1. 開園前に届いた場合は、終了せずに 8:30 まで待つ（最大3時間）。
+#     2. 区切りで止めず、走れるだけ走る（1回あたり最大5時間20分）。
+#   これで「早く届いても遅く届いても拾える」形になる。
 
 on:
   schedule:
-    # UTC表記。日本時間はこれに+9時間。保険のため1コマにつき2回ずつ起動を試みる。
-    - cron: "25 23 * * *"   # 日本時間  8:25
-    - cron: "55 23 * * *"   # 日本時間  8:55
-    - cron: "5 4 * * *"     # 日本時間 13:05
-    - cron: "35 4 * * *"    # 日本時間 13:35
-    - cron: "35 8 * * *"    # 日本時間 17:35
-    - cron: "5 9 * * *"     # 日本時間 18:05
-  workflow_dispatch:        # 手で動かしたいとき用のボタン
+    # UTC表記（日本時間は+9時間）。遅延を見越して広くばらまく。
+    - cron: "30 20 * * *"   # 日本時間  5:30 → 8:30まで待機
+    - cron: "30 21 * * *"   # 日本時間  6:30 → 8:30まで待機
+    - cron: "0 23 * * *"    # 日本時間  8:00 → 8:30まで待機
+    - cron: "0 1 * * *"     # 日本時間 10:00
+    - cron: "0 3 * * *"     # 日本時間 12:00
+    - cron: "0 5 * * *"     # 日本時間 14:00
+    - cron: "0 7 * * *"     # 日本時間 16:00
+    - cron: "0 9 * * *"     # 日本時間 18:00
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
   group: collect
-  cancel-in-progress: false   # 走っている最中のものは止めない。次のは順番待ちにする。
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 330      # 1コマ4時間半。上限6時間より十分手前で切る。
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -42,29 +41,37 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 15分おきに取り続ける
+      - name: 開園から閉園まで15分おきに取り続ける
         env:
           TZ: Asia/Tokyo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          b1=$(date -d "today 13:00" +%s)
-          b2=$(date -d "today 17:30" +%s)
-          b3=$(date -d "today 22:00" +%s)
-          now=$(date +%s)
-          if [ "$now" -lt "$(date -d "today 08:00" +%s)" ]; then
-            echo "開園前すぎます（$(date +%H:%M) JST）。何もせず終わります。"
+          OPEN=$(date -d "today 08:30" +%s)
+          CLOSE=$(date -d "today 22:00" +%s)
+          START=$(date +%s)
+          MAXWAIT=10800     # 開園まで待てるのは最大3時間
+          MAXRUN=19200      # 1回の実行は最大5時間20分
+
+          if [ "$START" -ge "$CLOSE" ]; then
+            echo "閉園後に届きました（$(date +%H:%M) JST）。何もせず終わります。"
             exit 0
           fi
-          if   [ "$now" -lt "$b1" ]; then end=$b1
-          elif [ "$now" -lt "$b2" ]; then end=$b2
-          elif [ "$now" -lt "$b3" ]; then end=$b3
-          else
-            echo "営業時間を過ぎてから起動しました（$(date +%H:%M) JST）。何もせず終わります。"
-            exit 0
+
+          if [ "$START" -lt "$OPEN" ]; then
+            WAIT=$((OPEN - START))
+            if [ "$WAIT" -gt "$MAXWAIT" ]; then
+              echo "開園より $((WAIT / 60)) 分も早く届きました。待ちすぎになるので終わります。"
+              exit 0
+            fi
+            echo "$(date +%H:%M) JST に届きました。開園の 8:30 まで $((WAIT / 60)) 分待ちます。"
+            sleep "$WAIT"
           fi
-          echo "$(date +%H:%M) JST に開始。$(date -d "@$end" +%H:%M) JST まで15分おきに取ります。"
+
+          END=$((START + MAXRUN))
+          [ "$END" -gt "$CLOSE" ] && END=$CLOSE
+          echo "収集開始 $(date +%H:%M) JST → $(date -d "@$END" +%H:%M) JST まで"
 
           while true; do
             echo "---- $(date +%H:%M) JST ----"
@@ -87,8 +94,8 @@ jobs:
             fi
 
             now=$(date +%s)
-            if [ "$now" -ge "$end" ]; then
-              echo "このコマの終わりに来ました。"
+            if [ "$now" -ge "$END" ]; then
+              echo "この実行の持ち時間が終わりました。"
               break
             fi
             sleep $(( 900 - (now % 900) ))
